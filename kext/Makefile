@@ -3,12 +3,16 @@ SDK     ?= $(CURDIR)/../MacKernelSDK
 # Intel production-signed SOF firmwares (the CSE rejects community-signed builds: ROM error 44)
 FW_TGL   = ../firmware/intel/sof-tgl.ri
 FW_CML   = ../firmware/intel/sof-cml.ri
-OBJS     = build/TGLDmic.o build/DspBoot.o build/Capture.o build/TGLDmicUserClient.o build/Firmware.o build/kmod_info.o
+LILU     = ../Lilu.kext/Contents/Resources
+OBJS     = build/TGLDmic.o build/DspBoot.o build/Capture.o build/Inject.o build/TGLDmicLilu.o \
+           build/plugin_start.o build/Firmware.o build/kmod_info.o
 OUT      = build/TGLDmic.kext
 ARCH     = -arch x86_64 -mmacosx-version-min=10.15
-CXXFLAGS = $(ARCH) -std=gnu++17 -O2 -Wall -Wno-unused-private-field \
+CXXFLAGS = $(ARCH) -std=gnu++17 -O2 -Wall -Wno-unused-private-field -Wno-unused-parameter \
            -nostdinc -isystem $(SDK)/Headers -mkernel -fapple-kext -fno-rtti -fno-exceptions \
-           -fno-builtin -fno-common -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -ITGLDmic
+           -fno-builtin -fno-common -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -ITGLDmic \
+           -I$(LILU) -DPRODUCT_NAME=TGLDmic -DMODULE_VERSION=0.6.4 -DLILU_CUSTOM_IOKIT_INIT=1 -DLILU_CUSTOM_KMOD_INIT=1 \
+           -Wno-deprecated-declarations
 CFLAGS   = $(ARCH) -std=gnu11 -O2 -nostdinc -isystem $(SDK)/Headers -mkernel -fno-builtin -fno-common -DKERNEL
 CCKEXT   = $(shell clang -print-resource-dir)/lib/darwin/libclang_rt.cc_kext.a
 LDFLAGS  = $(ARCH) -nostdlib -Xlinker -kext -Xlinker -export_dynamic -L$(SDK)/Library/x86_64 -lkmod \
@@ -16,7 +20,7 @@ LDFLAGS  = $(ARCH) -nostdlib -Xlinker -kext -Xlinker -export_dynamic -L$(SDK)/Li
 
 all: $(OUT)
 
-build/%.o: TGLDmic/%.cpp TGLDmic/*.hpp
+build/%.o: TGLDmic/%.cpp TGLDmic/*.hpp TGLDmic/*.h
 	@mkdir -p build
 	clang++ $(CXXFLAGS) -c $< -o $@
 build/Firmware.c: $(FW_TGL) $(FW_CML) ../tools/gen-fw.py
@@ -27,6 +31,9 @@ build/Firmware.o: build/Firmware.c
 build/kmod_info.o: TGLDmic/kmod_info.c
 	@mkdir -p build
 	clang $(CFLAGS) -c $< -o $@
+build/plugin_start.o: $(LILU)/Library/plugin_start.cpp
+	@mkdir -p build
+	clang++ $(CXXFLAGS) -c $< -o $@
 
 $(OUT): $(OBJS) TGLDmic/Info.plist
 	rm -rf $(OUT) && mkdir -p $(OUT)/Contents/MacOS

@@ -61,6 +61,11 @@ struct DmaBuffer {
     }
     // Drop stale cache lines before the CPU reads data the controller wrote.
     void invalidate() { if (mem) mem->performOperation(kIOMemoryIncoherentIOFlush, 0, size); }
+    void invalidate(size_t off, size_t len) {
+        if (!mem || !len || off >= size) return;
+        if (off + len > size) len = size - off;
+        mem->performOperation(kIOMemoryIncoherentIOFlush, off, len);
+    }
 
     void release() {
         if (cmd) { cmd->clearMemoryDescriptor(true); OSSafeReleaseNULL(cmd); }

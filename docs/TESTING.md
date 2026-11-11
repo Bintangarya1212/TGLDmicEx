@@ -1,6 +1,6 @@
 # Testing and debugging TGLDmic
 
-For development and bug reports. Normal users only need `-tgldmic` (see [INSTALL.md](INSTALL.md)).
+For development and bug reports. Normal users only need `-tgldmiclilu` (see [INSTALL.md](INSTALL.md)).
 
 ## Boot arguments
 | Boot arg | Mode | What it does |
@@ -11,7 +11,6 @@ For development and bug reports. Normal users only need `-tgldmic` (see [INSTALL
 | `-tgldmickeep` | 2 + | Leaves the DSP running after the boot test |
 | `-tgldmiccap` | 3 – capture test | Boots, records 8 s from the mics, tears down |
 | `tgldmicdelay=<s>` | 2/3 | Delay before the test, 10–170 s (default 20) |
-| `-tgldmic` | 4 – service | Normal use: microphone exposed to Core Audio |
 | `-tgldmicoff` | – | Disables the kext completely |
 | `-tgldmiccml` | – | Force Comet Lake / Whiskey Lake platform handling (`sof-cml.ri`, cAVS 1.8 4-core mask) |
 | `-tgldmictgl` | – | Force Tiger Lake platform handling (`sof-tgl.ri`, cAVS 2.5 1-core mask) |
@@ -21,6 +20,8 @@ For development and bug reports. Normal users only need `-tgldmic` (see [INSTALL
 | `tgldmicdma=2` | – | Force physical DMA addresses (testing only; default uses the device or system IOMMU mapper) |
 | `tgldmicsnoop=0` / `=2` | – | DEVC no-snoop enable (PCI 0x78 bit 11, required by the DSP ROM): default sets it while the DSP is powered and restores it after; `0` never touches it, `2` leaves it set |
 | `tgldmicpm=1` / `=0` | – | Force / never join the HDA driver's power tree (default: only under AppleHDA) |
+| `-tgldmiclilu` / `-tgldmicinject` | 6 – hook | Route `AppleHDAEngine::convertInputSamples` through Lilu and feed the native Internal Microphone engine from the DSP ring (DSP boots on demand). The two flags are equivalent. |
+| `tgldmicgain=<pct>` | 6 | Software gain for the hooked samples, 0–400 % (default 100) |
 
 `TGLDmicPhase` in ioreg shows the active mode. The `Log` property holds the kext's last 128 log lines.
 
@@ -54,12 +55,40 @@ It publishes the loudest second as `CaptureSnapshot` and a 100 ms loudness envel
 
 Reference levels on the EliteBook 840 G8: about -60 dBFS quiet, -50 to -30 dBFS when talking.
 
-## Mode 4: kernel path without Core Audio
-With `-tgldmic`, test the kext directly before installing the plug-in:
+## Mode 6: hook AppleHDA's input conversion
+`-tgldmiclilu` (or `-tgldmicinject`) registers an AppleHDA load listener with Lilu and routes
+`AppleHDAEngine::convertInputSamples`. For the internal microphone the hook fills the Core Audio
+client buffer from the DSP ring and returns; the original converter is not called. Other inputs use
+AppleHDA's original path.
 
-    ./tgldmic-probe 3 probe.wav
+    ioreg -l -w0 -c TGLDmic | grep -E '"(LiluHook|HookReqAccess|HookRouteOk|HookKextCb|HookFills|HookFrames|InjectState|Streaming|InjectIdx|InjectTag|InjectRate|InjectFormat)"'
 
-Expect `start: 0x0`, about 48000 frames/s and the levels above.
+| ioreg | Expected while recording |
+|---|---|
+| `HookReqAccess`, `HookPluginStart`, `HookOnKextErr` | 1 |
+| `HookKextCb` | > 0 (AppleHDA load notifications) |
+| `HookRouteOk` | 1 |
+| `LiluHook` | Yes |
+| `HookFills`, `HookFrames` | rising while recording |
+| `InjectState` | 2 (1 = waiting for the hook/internal-mic engine) |
+| `Streaming` | Yes |
+| `InjectIdx`, `InjectTag` | the internal-mic descriptor/tag |
+| `InjectFormat`, `InjectRate`, `InjectBits`, `InjectChannels` | the engine's format (HDA `SD_FMT`) |
+| `InjectRingFrames` | engine ring frames (CBL / bytes per frame) |
+
+Log lines to expect: `inject: descriptor N starts: ...`, `inject: streaming into input N ...
+AppleHDA convertInputSamples hook`, then `hook: N fills, N frames | engine W ..., DSP pos ...`
+every ~5 s.
+
+Failure modes:
+* `HookReqAccess = 7` – TooLate: the kext did not load before Lilu's registration window closed; the
+  early `TGLDmicEarly` IOResources personality must be present.
+* `LiluHook = No`, `HookRouteOk = 0/2` – registration or routing failed; check `HookKextCb` and
+  AppleHDA.
+* `HookFills` stays 0 – `convertInputSamples` is not reached for the internal mic, or another input
+  is active.
+* External mic/line-in is active – by design the hook only matches the internal-mic tag; no
+  injection.
 
 ## Comparing two setups (OS, EFI)
 The first boot attempt saves the controller state left by the HDA driver as `PreBootRegs`
@@ -68,12 +97,13 @@ The first boot attempt saves the controller state left by the HDA driver as `Pre
     ioreg -a -r -c TGLDmic -d 1 > regs-ventura.plist     # on each setup
     python3 tools/diff-regs.py regs-ventura.plist regs-tahoe.plist
 
-## Core Audio plug-in
-    python3 tools/list-audio-devices.py      # is "Internal Microphone (TGLDmic)" published?
-    log show --last boot --predicate 'eventMessage CONTAINS "TGLDmic: "' --info
+## Core Audio device
+    python3 tools/list-audio-devices.py      # the native "Internal Microphone" must be published
+    log show --last boot --predicate 'eventMessage CONTAINS "TGLDmic"' --info
     log show --last 10m --predicate 'eventMessage CONTAINS "TGLDmic"' --info
 
-While recording, ioreg should show `Streaming = Yes` and `PowerHold = Yes`.
+While recording, ioreg should show `Streaming = Yes`, `InjectState = 2`, `LiluHook = Yes` and a
+rising `HookFills`/`HookFrames`; `PowerHold = Yes` while the DSP is up.
 
 ## Checklist for a release
 - [ ] Speakers and headset still work with the kext loaded

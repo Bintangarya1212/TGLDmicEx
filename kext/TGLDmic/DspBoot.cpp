@@ -292,10 +292,16 @@ bool TGLDmic::bootDsp() {
     size_t fwBytes = fwTotalSize - skip;
     LOG("boot: %s, %u bytes total, payload %zu bytes after %zu-byte ext manifest", fwName, fwTotalSize, fwBytes, skip);
 
-    // Spare output stream: highest output descriptor (AppleHDA starts from output 0)
-    uint32_t outIdx = numOut - 1, idx = numIn + outIdx, tag = outIdx + 1;
+    // Spare output stream: highest output descriptor not currently running (AppleHDA starts from
+    // output 0, so the last one is normally free). Choosing a non-running one matters when the DSP is
+    // booted on demand while the user is already playing audio.
+    uint32_t outIdx = numOut ? numOut - 1 : 0;
+    for (uint32_t i = numOut; i-- > 0;) {
+        if (!(r32(sdOffset(numIn + i)) & HDA::SD_CTL_RUN)) { outIdx = i; break; }
+    }
+    uint32_t idx = numIn + outIdx, tag = outIdx + 1;
     if ((r32(sdOffset(idx)) & HDA::SD_CTL_RUN) && !(r32(ppOffset + HDA::PP_PPCTL) & (1u << idx))) {
-        fail("spare output stream in use by the HDA driver", idx); return false;
+        fail("no spare output stream (all in use by the HDA driver)", idx); return false;
     }
 
     if (!clBuf.alloc(pci, fwBytes) || !bdlBuf.alloc(pci, 4096)) { fail("DMA alloc (<4GB contiguous)", 0); return false; }

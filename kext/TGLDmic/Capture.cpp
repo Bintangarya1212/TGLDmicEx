@@ -170,7 +170,6 @@ bool TGLDmic::pipelineStart() {
     if (!replay(kIpc_start, COUNT(kIpc_start), "start")) { pipelineStop(); return false; }
     triggered = true;
     streaming = true;
-    generation++;
     return true;
 }
 
@@ -189,55 +188,6 @@ void TGLDmic::pipelineStop() {
     w32(sd, r32(sd) & ~SD_TAG_MASK);
     w32(ppOffset + HDA::PP_PPCTL, r32(ppOffset + HDA::PP_PPCTL) & ~(1u << idx));
     triggered = setupDone = streaming = false;
-}
-
-// ---------------- Phase 4 service API ----------------
-IOReturn TGLDmic::gatedStart(OSObject *o, void *, void *, void *, void *) {
-    auto self = OSDynamicCast(TGLDmic, o);
-    if (!self) return kIOReturnBadArgument;
-    if (self->startCount++ > 0 && self->streaming) return kIOReturnSuccess;
-    // Hold power first: this wakes the HDA driver, which takes the controller out of reset.
-    bool powered = self->holdPower();
-    if (!powered || !self->tryInit()) {
-        self->startCount--;
-        if (self->startCount == 0) self->releasePower();
-        self->LOG("svc: start refused (%s)", powered ? "controller registers not readable" : "controller did not come out of reset/D3");
-        return kIOReturnNotReady;
-    }
-    if (!self->dspAlive(true)) {
-        self->LOG("svc: DSP not running - booting");
-        self->keepRunning = true;
-        if (!self->bootDsp()) {
-            self->startCount--;
-            if (self->startCount == 0) { self->keepRunning = false; self->releasePower(); }
-            self->publish();
-            return kIOReturnNoDevice;
-        }
-    }
-    bool ok = self->pipelineStart();
-    if (!ok && --self->startCount == 0) {
-        self->corePowerDown(); self->gating(true); self->keepRunning = false; self->releasePower();
-    }
-    self->LOG("svc: start (clients %u) -> %s", self->startCount, ok ? "streaming" : self->captureResult);
-    self->publish();
-    return ok ? kIOReturnSuccess : kIOReturnIOError;
-}
-
-IOReturn TGLDmic::gatedStop(OSObject *o, void *, void *, void *, void *) {
-    auto self = OSDynamicCast(TGLDmic, o);
-    if (!self) return kIOReturnBadArgument;
-    if (self->startCount == 0) return kIOReturnSuccess;
-    if (--self->startCount == 0) {
-        // Last client: stop the pipeline, power the DSP down cleanly, let the controller idle again.
-        if (self->streaming || self->setupDone) self->pipelineStop();
-        self->corePowerDown();
-        self->gating(true);
-        self->keepRunning = false;
-        self->releasePower();
-        self->LOG("svc: stopped (no clients), DSP powered down, power released");
-        self->publish();
-    }
-    return kIOReturnSuccess;
 }
 
 // System sleep / parent power-down while streaming: the DSP will lose state, so stop cleanly.
@@ -270,35 +220,6 @@ bool TGLDmic::holdPower() {
 
 void TGLDmic::releasePower() {
     if (pmJoined) changePowerStateTo(0);
-}
-
-IOReturn TGLDmic::gatedEnsureBuffers(OSObject *o, void *, void *, void *, void *) {
-    auto self = OSDynamicCast(TGLDmic, o);
-    return (self && self->ensureCaptureBuffers()) ? kIOReturnSuccess : kIOReturnNoMemory;
-}
-
-IOReturn TGLDmic::clientStart() { return gate ? gate->runAction(gatedStart) : kIOReturnNotReady; }
-IOReturn TGLDmic::clientStop()  { return gate ? gate->runAction(gatedStop) : kIOReturnNotReady; }
-
-IOReturn TGLDmic::readPosition(uint64_t *dpibBytes, uint64_t *hostTime, uint64_t *gen) {
-    if (!streaming || !hda) return kIOReturnNotReady;
-    uint32_t d = r32(VS_DPIB_BASE + VS_DPIB_STRIDE * capInIndex);
-    *hostTime = mach_absolute_time();
-    if (d == 0xFFFFFFFF) return kIOReturnNoDevice;
-    *dpibBytes = d % RING_BYTES;
-    *gen = generation;
-    return kIOReturnSuccess;
-}
-
-IOMemoryDescriptor *TGLDmic::ringMemory() {
-    if (gate) gate->runAction(gatedEnsureBuffers);
-    if (!ringBuf.mem) return nullptr;
-    ringBuf.mem->retain();
-    return ringBuf.mem;
-}
-
-uint32_t TGLDmic::stateBits() {
-    return (dspAlive() ? 1u : 0u) | (streaming ? 2u : 0u) | (serviceMode ? 4u : 0u);
 }
 
 bool TGLDmic::captureTest() {

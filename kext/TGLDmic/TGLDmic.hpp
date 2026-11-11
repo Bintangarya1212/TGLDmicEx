@@ -9,13 +9,19 @@
 
 struct IpcMsg;   // IpcReplay.hpp
 
+// Hook-registration diagnostics shared with TGLDmicLilu.cpp and published by TGLDmic::publish().
+// Error/result fields use +1 encoding so 0 means "not reached".
+struct TGLDmicHookStatus {
+    uint32_t kmodEntry, reqAccess, shouldLoad, started, arg, onKextErr, kextCb, routeOk;
+};
+extern TGLDmicHookStatus tgldmicHookStatus;
+
 // TGLDmic: Digital Microphone driver for Intel Tiger Lake (cAVS 2.5) and
 // Comet Lake / Cannon Lake / Coffee Lake (cAVS 1.8), including ThinkPad X1 Carbon Gen 7.
 // Matches the HDA controller next to AppleHDA (own IOMatchCategory, provider is never opened),
 // boots Intel SOF production-signed firmware on the audio DSP and streams 48 kHz DMIC audio.
 class TGLDmic : public IOService {
     OSDeclareDefaultStructors(TGLDmic)
-    friend class TGLDmicUserClient;
 public:
     enum PlatformFamily : uint32_t {
         kPlatformUnknown   = 0,
@@ -23,13 +29,7 @@ public:
         kPlatformCometLake  = 2, // Intel Comet Lake / Cannon Lake / Coffee Lake (cAVS 1.8)
     };
 
-    // ---- Phase 4 service API (called by TGLDmicUserClient; all serialized on the work loop) ----
-    static constexpr uint32_t kRingBytes = 0x10000, kFrameBytes = 16, kRate = 48000, kChannels = 4;
-    IOReturn clientStart();                       // refcounted: first start boots DSP if needed + starts pipeline
-    IOReturn clientStop();
-    IOReturn readPosition(uint64_t *dpibBytes, uint64_t *hostTime, uint64_t *generation);
-    IOMemoryDescriptor *ringMemory();             // retained; nullptr if not allocated
-    uint32_t stateBits();                         // bit0 dsp up, bit1 streaming, bit2 service mode
+    static constexpr uint32_t kRingBytes = 0x10000;   // DSP host DMA ring
     IOService *probe(IOService *provider, SInt32 *score) override;
     IOReturn setPowerState(unsigned long state, IOService *device) override;
     bool start(IOService *provider) override;
@@ -38,6 +38,19 @@ public:
 
     PlatformFamily getPlatformFamily() const { return platformFamily; }
     const char *platformName() const;
+
+    // ---- Lilu hook mode (-tgldmiclilu) ----
+    // The injected DSP samples are no longer copied by a kernel timer racing the HDA DMA. Instead
+    // Lilu routes IOAudioStream::readInputSamples in IOAudioFamily; the internal microphone's copy
+    // path fills the engine's ring with DSP samples immediately before AppleHDA converts them to the
+    // client format. gInstance is the live service the hook talks to (set in start, cleared in stop).
+    static TGLDmic *instance() { return gInstance; }
+    static void setHookInstalled(bool ok) { hookInstalled = ok; }
+    static bool hookIsInstalled() { return hookInstalled; }
+    // Fill the CoreAudio client buffer directly from the DSP ring. Returns true when the request was
+    // handled, in which case the hook returns without calling the original AppleHDA converter.
+    bool hookFillClient(void *destBuf, uint32_t firstSampleFrame, uint32_t numSampleFrames,
+                        const void *streamFormat, void *audioStream);
 
 private:
     IOPCIDevice *pci {nullptr};
@@ -136,21 +149,65 @@ private:
     uint32_t wdPm {0xFFFF}, wdGctl {0}, wdAdspcs {0}, wdTicks {0};
     bool captureTest();
 
-    // ---- Phase 4 service state ----
+    // ---- Phase 6: feed the DSP microphone into AppleHDA's own input engine ----
+    // The native "Internal Microphone" still belongs to AppleHDA. Lilu routes
+    // AppleHDAEngine::convertInputSamples; when the internal mic's stream is converted, the hook
+    // fills the CoreAudio client buffer directly from the DSP ring and returns. No kernel timer and
+    // no writes into the HDA DMA ring are involved.
+    bool injectorEnabled {false};
+    bool injecting {false};
+    uint32_t injectIdx {0};
+    uint32_t injectTag {0};
+    uint32_t injectFmt {0}, injectFrameBytes {0}, injectChannels {0}, injectBits {0}, injectRate {48000};
+    uint32_t injectRingBytes {0}, injectRingFrames {0};
+    uint32_t injectGainQ16 {1u << 16}; // tgldmicgain=<percent>, software gain applied on the way in
+    uint64_t injectStep {1ULL << 32};   // 48000/engineRate in 32.32
+    uint32_t injectNextTry {0};        // samples tick before which a failed start is not retried
+    bool injectOwnsPipeline {false}, injectBootedDsp {false}, injectPowerHeld {false};
+    // AppleHDA moves its stream descriptors between boots, but the internal mic's IOAudioEngine
+    // keeps a fixed tag (the last field of IOAudioEngineGlobalUniqueID). Look it up and prefer the
+    // running descriptor with that tag instead of trusting an index.
+    uint32_t imicTag {0};              // 0 = not found yet
+    uint32_t injectCandidates {0};     // running coupled input descriptors found by the last watch
+    uint32_t imicSearchTick {0};       // samples tick before the next engine lookup
+    uint32_t imicSafetyFrames {57};    // IOAudioEngineInputSampleOffset of the internal mic
+    static constexpr uint32_t kInjectRate = 48000, kInjectSrcFrames = kRingBytes / 16;
+    bool findImicTag();
+    bool injectorWatch();
+    bool injectorStart(uint32_t idx);
+    void injectorStop(const char *why);
+
+    // ---- Lilu hook state ----
+    static TGLDmic *gInstance;
+    static bool hookInstalled;
+    bool hookWaitLogged {false};       // one-time "waiting for the hook" message
+    bool notImicLogged {false};        // one-time "another input is active" message
+    volatile uint32_t hookInFlight {0}; // fast-path reentrancy guard around stop/power-down
+    uint64_t hookFills {0}, hookFrames {0};
+    uint64_t hookFillsSeen {0};
+    // DPIB may be updated in DSP period bursts; the source phase is therefore free-run from
+    // mach_absolute_time and resynchronised to DPIB only when the two drift apart.
+    bool hookDspInit {false};
+    uint64_t hookDspQ {0};             // smoothed DSP write position, 32.32 ring frames
+    uint64_t hookDspTime {0};          // mach_absolute_time of hookDspQ
+    // The internal microphone's IOAudioStream objects, children of AppleHDAEngineInput. Retained;
+    // convertInputSamples runs for every input stream, so the hook only fills these.
+    IOService *imicEngine {nullptr};
+    IOService *imicStreams[8] {};
+    uint32_t imicStreamCount {0};
+    void cacheImicStreams(IOService *engine);
+    void releaseImicStreams();
+
+    // ---- Runtime / power state ----
     bool serviceMode {false};
     bool streaming {false};
     bool setupDone {false}, triggered {false};
     bool gatingOff {false};
-    uint32_t startCount {0};
-    uint64_t generation {0};
     IOCommandGate *gate {nullptr};
-    static IOReturn gatedStart(OSObject *o, void *, void *, void *, void *);
-    static IOReturn gatedStop(OSObject *o, void *, void *, void *, void *);
-    static IOReturn gatedEnsureBuffers(OSObject *o, void *, void *, void *, void *);
     static IOReturn gatedShutdown(OSObject *o, void *, void *, void *, void *);
     static IOReturn gatedPowerLost(OSObject *o, void *, void *, void *, void *);
-    // Power management: TGLDmic is a PM child of the HDA PCI device. While a client records we hold
-    // "on" (state 1), so the HDA driver's idle D3 cannot reset the DSP mid-stream.
+    // Power management: TGLDmic is a PM child of the HDA PCI device. While injection is active we
+    // hold "on" (state 1), so the HDA driver's idle D3 cannot reset the DSP mid-stream.
     bool pmJoined {false};
     IOService *pmParent {nullptr};    // the HDA driver (AppleHDAController / HDA-Universal / VoodooHDA), else the PCI device
     uint32_t pmSearchTicks {0};

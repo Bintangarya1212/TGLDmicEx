@@ -2,6 +2,8 @@
 *.wav
 captures/**/*.ri
 kext/build/
-hal/build/
 dist/
+# Build dependencies (fetched by CI, not tracked)
+Lilu.kext
+MacKernelSDK
 .DS_Store

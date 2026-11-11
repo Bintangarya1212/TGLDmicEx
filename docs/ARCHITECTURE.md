@@ -67,25 +67,52 @@ which is a separate, later code path.
 | 1 ✅ | Read-only probe kext next to AppleHDA | Logs GCAP/PPCAP/ADSPCS, no audio regression |
 | 2 ✅ | DSP boot on macOS | FW_READY received; speakers still work |
 | 3 ✅ | IPC replay + decoupled input DMA | PCM samples with non-zero RMS in a debug buffer |
-| 4 ✅ | AudioServerPlugIn (user-space Core Audio driver) fed by the kext | Mic visible in Sound settings, records in QuickTime |
+| 4 ❌ | AudioServerPlugIn (user-space Core Audio driver) fed by the kext — removed in 0.6.4 | Replaced by the native hook below |
 | 5 | Robustness | Survives AppleHDA reset, sleep/wake, gain control |
+| 6 ✅ | Hook the HDA driver's input conversion and feed the native input engine | Native "Internal Microphone" records DSP audio, no second device |
 
-## Exposing the mic to macOS: AudioServerPlugIn, not IOAudioFamily
-IOAudioEngine kexts depend on IOAudioFamily, whose future on Tahoe is uncertain (it ships with the
-AppleHDA stack that Apple is dropping). The Core Audio-supported way is a user-space
-**AudioServerPlugIn** (HAL driver, like BlackHole) in `/Library/Audio/Plug-Ins/HAL`:
-```
-TGLDmic.kext  ──(IOUserClient: map 64 KB DMA ring + read DPIB position)──►  TGLDmic.driver (HAL plug-in)  ──►  coreaudiod
-```
-* The ring buffer the DSP writes into is mapped read-only into the plug-in, so there's no copy in the kernel.
-* The plug-in timestamps from the DMA position and handles 4-channel routing, blending, and software gain.
-* The same plug-in works on Ventura through Tahoe, whichever driver owns the speakers.
+## Exposing the mic to macOS: native hook (0.6.4)
 
-### 4-Channel Microphone Routing & Blend Modes
-Laptops like the ThinkPad X1 Carbon Gen 7 feature a 4-channel 360-degree far-field microphone array (2 facing forward near the webcam, 2 facing 360°/upward). TGLDmic captures all 4 channels (PCM 6, 48 kHz, S32_LE) and provides user-configurable stereo routing via user defaults (`defaults write com.labrouss.TGLDmic ChannelMode <mode>`):
-* **Mode 0 (Default)**: Front mic pair (Ch 0 = Left, Ch 1 = Right). Best for conferencing and video calls facing the screen.
-* **Mode 1**: Ambient / rear mic pair (Ch 2 = Left, Ch 3 = Right). For room audio or ambient capture.
-* **Mode 2**: 4-channel blend: Stereo pair blending `(Ch0 + Ch2) / 2` (Left) and `(Ch1 + Ch3) / 2` (Right). Provides 360-degree coverage across all four physical microphones.
+Earlier versions used a user-space `AudioServerPlugIn` (HAL plug-in) plus an `IOUserClient` that
+exported the DSP ring to it. That path was removed in 0.6.4: the kernel driver now hooks
+`AppleHDAEngine::convertInputSamples` through Lilu and feeds the input engine macOS already
+publishes. No `/Library/Audio/Plug-Ins/HAL` bundle, no second device and no user client exist.
+
+## Phase 6: hook AppleHDA's input conversion (no second device)
+
+TGLDmic registers an AppleHDA kext-load listener with Lilu and routes
+`AppleHDAEngine::convertInputSamples`. For the internal microphone's `IOAudioStream` the hook fills
+the Core Audio client buffer directly from the DSP ring and returns; the original converter (which
+would read the silent codec/analog DMA path) is not called. Other inputs call the original.
+
+```
+Core Audio client ◄─ convertInputSamples hook ◄─ DSP ring (48 kHz, 4ch, S32_LE)
+                          │
+                          └─ only when audioStream == internal mic; otherwise AppleHDA's original
+```
+
+* Identification: the internal mic's `AppleHDAEngineInput` is found via
+  `IOAudioEngineDescription` = `DevShortNameIMic`; its `AppleHDAStream` children are cached and
+  compared by pointer, and the HDA stream descriptor is matched by the tag from
+  `IOAudioEngineGlobalUniqueID`. Headset mic / line-in are never touched.
+* Format: DSP S32_LE 4ch 48 kHz → target channels and engine rate; Float32 for mixable client
+  buffers (the normal case), integer packing for non-mixable ones. No timer and no HDA ring writes.
+* The hook runs on the audio engine's thread: no allocation, no locks; only DSP ring reads and
+  client buffer writes.
+* Lilu load order: a kext whose only personality is `IOPCIDevice` is loaded at PCI match time, after
+  Lilu has closed plugin registration (`requestAccess` → `TooLate`). The `TGLDmicEarly`
+  `IOResources` personality makes the kext load immediately after Lilu; the PCI personality still
+  starts the real service later.
+* DSP boot is on demand when the internal-mic engine starts; it is powered down shortly after it
+  stops.
+* Limits: only the internal-mic tag is eligible; the codec input stream must actually run for Core
+  Audio to call the converter. 44.1/96 kHz rely on host-side linear resampling from the DSP's native
+  48 kHz.
+
+### 4-Channel Microphone Routing
+The DSP ring carries 4 channels (S32_LE, 48 kHz): ch0/ch1 = mic pair A, ch2 == ch3 = mic B. The hook
+maps ch0/ch1 to the stereo client buffer (or their average for mono). The old user-default
+`ChannelMode` routing/blend modes belonged to the removed HAL plug-in.
 
 ## Main risks
 0. The controller owner differs per macOS version (see above): stream usage and power
@@ -99,7 +126,8 @@ Laptops like the ThinkPad X1 Carbon Gen 7 feature a 4-channel 360-degree far-fie
 
 ## Build
 MacKernelSDK + Xcode on a GitHub Actions `macos` runner (no local Mac build
-needed). No Lilu dependency planned.
+needed). The Lilu 1.7.x plugin headers and `plugin_start.cpp` are taken from a
+Lilu.kext release next to the repository.
 
 ## Target pipeline (from sof-hda-generic-4ch.tplg, SOF v2.2, IPC3)
 PCM 6 "DMIC" (48 kHz), pipeline 10 — the only one TGLDmic needs:

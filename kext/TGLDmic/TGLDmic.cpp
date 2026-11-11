@@ -7,6 +7,9 @@
 #define super IOService
 OSDefineMetaClassAndStructors(TGLDmic, IOService)
 
+TGLDmic *TGLDmic::gInstance = nullptr;
+bool TGLDmic::hookInstalled = false;
+
 #include <stdarg.h>
 #define LOG(fmt, ...) logLine(fmt, ##__VA_ARGS__)
 static constexpr unsigned kLogLines = 128;
@@ -16,7 +19,15 @@ static constexpr uint32_t kPollCount = 90;     // 3 minutes, then stop polling
 
 static bool bootArg(const char *name) {
     char buf[16];
-    return PE_parse_boot_argn(name, buf, sizeof(buf));
+    if (PE_parse_boot_argn(name, buf, sizeof(buf))) return true;
+    return name[0] == '-' && PE_parse_boot_argn(name + 1, buf, sizeof(buf));
+}
+
+// Numeric/string boot argument. Accepts both "-name=value" and "name=value", since the leading dash
+// convention differs between boot loaders and PE_parse_boot_argn implementations.
+static bool bootArgValue(const char *name, void *out, int len) {
+    if (PE_parse_boot_argn(name, out, len)) return true;
+    return name[0] == '-' && PE_parse_boot_argn(name + 1, out, len);
 }
 
 static IOPMPowerState gPowerStates[2] = {
@@ -210,12 +221,30 @@ bool TGLDmic::start(IOService *provider) {
     pci->retain();
     readDsp = bootArg("-tgldmicdsp");
     captureRequested = bootArg("-tgldmiccap");
-    serviceMode = bootArg("-tgldmic") && !captureRequested;
-    bootRequested = bootArg("-tgldmicboot") || captureRequested || serviceMode;
-    if (serviceMode) { keepRunning = false; bootDelaySec = 10; }   // boot-time boot = self-test, then power down
+    serviceMode = false;
+    bootRequested = bootArg("-tgldmicboot") || captureRequested;
     uint32_t delay = 0;
     if (PE_parse_boot_argn("tgldmicdelay", &delay, sizeof(delay)) && delay >= 10 && delay <= 170) bootDelaySec = delay;
     keepRunning = bootArg("-tgldmickeep");
+
+    // Phase 6: -tgldmicinject or -tgldmiclilu feeds the DSP microphone into AppleHDA's own input
+    // engine through the Lilu-hooked AppleHDAEngine::convertInputSamples. tgldmicgain=<percent>
+    // applies software gain on the way in.
+    injectorEnabled = bootArg("-tgldmicinject") || bootArg("-tgldmiclilu");
+    if (injectorEnabled) {
+        serviceMode = true;             // join the HDA driver's power tree, publish Phase 4 state
+        bootRequested = false;          // the DSP boots on demand, when the HDA engine starts
+        int gain = 100;
+        if (bootArgValue("-tgldmicgain", &gain, sizeof(gain))) {
+            if (gain < 0) gain = 0;
+            if (gain > 400) gain = 400;
+            injectGainQ16 = (uint32_t)((uint64_t)gain * 65536 / 100);
+        }
+        LOG("inject: enabled (software gain %u%%, AppleHDA convertInputSamples hook)",
+            (injectGainQ16 * 100) / 65536);
+        if (!hookInstalled)
+            LOG("inject: Lilu hook not installed yet - injection will wait for it");
+    }
 
     LOG("TGLDmic v%s on %s (Darwin %d.%d), dsp-reads=%s, dsp-boot=%s%s",
         kTGLDmicVersionString, provider->getName(), version_major, version_minor, readDsp ? "on" : "off",
@@ -250,6 +279,7 @@ bool TGLDmic::start(IOService *provider) {
             timer->setTimeoutMS(kPollMs);
     }
     publish();
+    gInstance = this;
     registerService();
     return true;
 }
@@ -306,12 +336,9 @@ void TGLDmic::snapshot(bool verbose) {
 
 void TGLDmic::publish() {
     setProperty("TGLDmicVersion", kTGLDmicVersionString);
-    setProperty("TGLDmicInterface", (unsigned long long)kTGLDmicInterfaceVersion, 32);
     setProperty("TGLDmicPhase", serviceMode ? 4ULL : captureRequested ? 3ULL : bootRequested ? 2ULL : 1ULL, 32);
     if (serviceMode) {
-        setProperty("ServiceClients", startCount, 32);
         setProperty("Streaming", streaming);
-        setProperty("StreamGeneration", generation, 64);
         setProperty("PowerHold", pmState == 1);
     }
     setProperty("StreamsIn", numIn, 32);
@@ -334,6 +361,35 @@ void TGLDmic::publish() {
         }
         if (capSnap && capSnap->getLength()) setProperty("CaptureSnapshot", capSnap);
         if (envLen) if (auto d = OSData::withBytes(env, envLen * 4)) { setProperty("CaptureEnvelope", d); d->release(); }
+    }
+    if (injectorEnabled) {
+        setProperty("Injector", true);
+        setProperty("InjectState", injecting ? 2ULL : 1ULL, 32);
+        setProperty("InjectImicTag", imicTag, 32);
+        setProperty("InjectSafetyFrames", imicSafetyFrames, 32);
+        setProperty("InjectCandidates", injectCandidates, 32);
+        setProperty("InjectIdx", injectIdx, 32);
+        setProperty("InjectTag", injectTag, 32);
+        setProperty("InjectFormat", injectFmt, 32);
+        setProperty("InjectRate", injectRate, 32);
+        setProperty("InjectBits", injectBits, 32);
+        setProperty("InjectChannels", injectChannels, 32);
+        setProperty("InjectRingFrames", injectRingFrames, 32);
+        setProperty("InjectGainQ16", injectGainQ16, 32);
+        setProperty("LiluMode", true);
+        setProperty("LiluHook", hookInstalled);
+        setProperty("HookFills", hookFills, 64);
+        setProperty("HookFrames", hookFrames, 64);
+        setProperty("ImicStreams", imicStreamCount, 32);
+        // Hook registration diagnostics (value 0 = not reached, errors are stored as error+1).
+        setProperty("HookKmodEntry", tgldmicHookStatus.kmodEntry, 32);
+        setProperty("HookReqAccess", tgldmicHookStatus.reqAccess, 32);
+        setProperty("HookShouldLoad", tgldmicHookStatus.shouldLoad, 32);
+        setProperty("HookPluginStart", tgldmicHookStatus.started, 32);
+        setProperty("HookArg", tgldmicHookStatus.arg, 32);
+        setProperty("HookOnKextErr", tgldmicHookStatus.onKextErr, 32);
+        setProperty("HookKextCb", tgldmicHookStatus.kextCb, 32);
+        setProperty("HookRouteOk", tgldmicHookStatus.routeOk, 32);
     }
     setProperty("PlatformFamily", platformName());
     setProperty("PciVendorDeviceId", pciId, 32);
@@ -358,8 +414,7 @@ void TGLDmic::watchdog() {
     uint32_t gctl = 0, cs = 0;
     if (pm == 0 && memoryDecoded()) { gctl = r32(HDA::GCTL); if (dsp) cs = d32(DSP::ADSPCS); }
     if (pm != wdPm || gctl != wdGctl || cs != wdAdspcs)
-        LOG("wd: t=%us D%u GCTL 0x%08x ADSPCS 0x%08x streaming %d clients %u", 180 + wdTicks * 10, pm, gctl, cs,
-            streaming, startCount);
+        LOG("wd: t=%us D%u GCTL 0x%08x ADSPCS 0x%08x streaming %d", 180 + wdTicks * 10, pm, gctl, cs, streaming);
     wdPm = pm; wdGctl = gctl; wdAdspcs = cs;
 }
 
@@ -369,12 +424,23 @@ void TGLDmic::timerFired(OSObject *owner, IOTimerEventSource *sender) {
     if (self->serviceMode && !self->pmJoined && self->pmSearchTicks < 1000) self->joinPowerParent();
     if (self->tryInit() && self->memoryDecoded() && self->inD0())
         self->snapshot(false);
+    if (self->injectorEnabled) self->injectorWatch();
     // Phase 2: one boot attempt ~20 s after the controller became usable (AppleHDA settled)
     if (self->bootRequested && self->ready && self->bootState == 0 && self->samples * (kPollMs / 1000) >= self->bootDelaySec) {
         self->bootDsp();
         self->publish();
     }
     self->samples++;
+    if (self->injectorEnabled) {
+        // Fast watcher: notice the HDA engine starting/stopping quickly. Record boot latency is
+        // dominated by the DSP boot (~120 ms), not by this interval.
+        // Publishing copies the log ring and is comparatively expensive; while injecting it owns
+        // the same work loop as the fast timer, so keep it out of the way.
+        if (self->samples == 1 || self->samples % (self->injecting ? 50 : 10) == 0) self->publish();
+        if (self->samples % 200 == 0) self->watchdog();
+        sender->setTimeoutMS(self->injecting ? 200 : 100);
+        return;
+    }
     self->publish();
     if (self->samples < kPollCount) sender->setTimeoutMS(kPollMs);
     else {
@@ -388,7 +454,6 @@ IOReturn TGLDmic::gatedShutdown(OSObject *o, void *, void *, void *, void *) {
     auto self = OSDynamicCast(TGLDmic, o);
     if (!self) return kIOReturnBadArgument;
     if (self->streaming || self->setupDone) self->pipelineStop();
-    self->startCount = 0;
     if (self->bootState == 1 && self->keepRunning) self->corePowerDown();
     self->gating(true);
     self->releaseCaptureBuffers();
@@ -396,6 +461,9 @@ IOReturn TGLDmic::gatedShutdown(OSObject *o, void *, void *, void *, void *) {
 }
 
 void TGLDmic::stop(IOService *provider) {
+    gInstance = nullptr;
+    injectorStop("driver stop");
+    releaseImicStreams();
     if (gate) gate->runAction(gatedShutdown); else gatedShutdown(this, nullptr, nullptr, nullptr, nullptr);
     if (pmJoined) { PMstop(); pmJoined = false; }
     OSSafeReleaseNULL(pmParent);
