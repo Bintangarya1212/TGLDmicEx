@@ -115,6 +115,12 @@ GitHub Actions 会在每次 push 时构建 kext，并在 `v*` tag 时附加到 R
 | `tools/` | 构建与诊断辅助脚本 |
 | `docs/` | 安装、测试、架构文档 |
 
+## 后期优化
+1. DSP的电源控制，目前好像是100ms定时器轮询，虽然没有性能，但是不太优雅；后面hook AppleHDA对麦克风启停控制API，优雅处理电源；
+2. 不支持麦克风静音，这个可以和DSP电源管理有关系；
+3. 以SOF固件默认48KHZ采样，44.1和96不支持，如果SOF支持设置DSP采样率，可以HOOK 对麦克风采样设置，实现动态调节采样率；
+4. apple sdk中 convertInputSamples已经标记为弃用，准备修改成hook convertInputSamplesVBR
+
 ## 致谢
 - [labrouss](https://github.com/labrouss) — 原始 TGLDmic
 - [Sound Open Firmware](https://github.com/thesofproject) — DSP 固件以及本项目所基于的 Linux 驱动
