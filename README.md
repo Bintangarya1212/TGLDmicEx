@@ -119,6 +119,12 @@ for the plugin headers and `plugin_start.cpp`):
 | `tools/` | Build and diagnostic helpers |
 | `docs/` | Install, testing, architecture |
 
+## Post-optimization
+1. DSP power control: currently it seems to use a 100ms timer polling approach. Although there's no performance issue, it's not very elegant; later we'll hook AppleHDA's microphone start/stop control API to handle power elegantly.
+2. Microphone mute is not supported; this may be related to DSP power management.
+3. The SOF firmware defaults to 48kHz sampling; 44.1 and 96 are not supported. If SOF supports setting the DSP sample rate, we can hook the microphone sample rate setting to achieve dynamic sample rate adjustment.
+4. In the Apple SDK, convertInputSamples has already been marked as deprecated; we plan to change it to hook convertInputSamplesVBR.
+
 ## Credits
 - [labrouss](https://github.com/labrouss) - for the original TGLDmic
 - [Sound Open Firmware](https://github.com/thesofproject) — the DSP firmware and the Linux driver this work is based on
