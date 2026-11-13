@@ -281,7 +281,8 @@ bool TGLDmic::start(IOService *provider) {
             timer->setTimeoutMS(kPollMs);
     }
     publish();
-    sleepNotifier = registerPrioritySleepWakeInterest(sleepWakeHandler, this);
+    if (auto rootDomain = getPMRootDomain())
+        sleepNotifier = rootDomain->registerPrioritySleepWakeInterest(sleepWakeHandler, this);
     gInstance = this;
     registerService();
     return true;
@@ -474,11 +475,13 @@ IOReturn TGLDmic::sleepWakeHandler(void *target, void *, UInt32 messageType,
         }
         self->corePowerDown();
         self->gating(true);
-        self->acknowledgeSleepWakeNotification(messageArgument);
+        if (auto rootDomain = getPMRootDomain())
+            rootDomain->acknowledgeSleepWakeNotification(messageArgument);
     } else if (messageType == kIOMessageSystemHasPoweredOn) {
         self->LOG("pm: system has powered on - waking");
         self->gating(false);
-        self->acknowledgeSleepWakeNotification(messageArgument);
+        if (auto rootDomain = getPMRootDomain())
+            rootDomain->acknowledgeSleepWakeNotification(messageArgument);
     }
     return kIOReturnSuccess;
 }

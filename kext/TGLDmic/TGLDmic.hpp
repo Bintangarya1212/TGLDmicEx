@@ -6,6 +6,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOMessage.h>
+#include <IOKit/pwr_mgt/IOPMrootDomain.h>
 #include "DmaBuffer.hpp"
 
 struct IpcMsg;   // IpcReplay.hpp
