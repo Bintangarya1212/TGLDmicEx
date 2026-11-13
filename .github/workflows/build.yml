@@ -16,12 +16,15 @@ jobs:
       - name: Lilu plugin headers
         run: |
           git clone --depth 1 --branch 1.7.2 https://github.com/acidanthera/Lilu /tmp/Lilu-src
-          mkdir -p Lilu.kext/Contents/Resources
-          cp -R /tmp/Lilu-src/Lilu/Headers /tmp/Lilu-src/Lilu/Library Lilu.kext/Contents/Resources/
+          rm -rf Lilu.kext
           mkdir -p Lilu.kext/Contents/Resources/Headers
+          mkdir -p Lilu.kext/Contents/Resources/Library
+          cp -L -R /tmp/Lilu-src/Lilu/Headers/. Lilu.kext/Contents/Resources/Headers/
+          cp -L -R /tmp/Lilu-src/Lilu/Library/. Lilu.kext/Contents/Resources/Library/
           if [ -f "kext/TGLDmic/Headers/hde64.h" ]; then
             cp kext/TGLDmic/Headers/hde64.h Lilu.kext/Contents/Resources/Headers/hde64.h
-          else
+          fi
+          if [ ! -f "Lilu.kext/Contents/Resources/Headers/hde64.h" ]; then
             cat << 'EOF' > Lilu.kext/Contents/Resources/Headers/hde64.h
           #ifndef _HDE64_H_
           #define _HDE64_H_
