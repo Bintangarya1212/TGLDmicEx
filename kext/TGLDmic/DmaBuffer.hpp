@@ -38,7 +38,7 @@ struct DmaBuffer {
                 mem->complete();
                 OSSafeReleaseNULL(mem);
             }
-            if (attempt < 4) IOSleep(50 * (attempt + 1));
+            if (attempt < 4) IOSleep((unsigned int)(50 * (attempt + 1)));
         }
         if (!mem) { OSSafeReleaseNULL(mapper); release(); return false; }
         virt = static_cast<uint8_t *>(mem->getBytesNoCopy());

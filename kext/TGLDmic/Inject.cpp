@@ -120,7 +120,7 @@ bool TGLDmic::injectorStart(uint32_t idx) {
             LOG("inject: DSP boot attempt %d failed (%s), retrying...", bootAttempt + 1, bootResult);
             corePowerDown();
             gating(true);
-            IOSleep(100 * (bootAttempt + 1));
+            IOSleep((unsigned int)(100 * (bootAttempt + 1)));
         }
         if (!bootOk) {
             LOG("inject: DSP boot failed after retries (%s)", bootResult);
