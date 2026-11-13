@@ -270,6 +270,8 @@ bool TGLDmic::start(IOService *provider) {
     LOG("at start: PCI CMD 0x%04x, D0=%d", pci->configRead16(kIOPCIConfigCommand), inD0());
     if (!tryInit()) LOG("controller not decoded yet (AppleHDA not started?) - retrying from timer");
 
+    preallocBuffers();
+
     workLoop = IOWorkLoop::workLoop();      // own loop: boot polling must not block the provider's
     if (workLoop) {
         gate = IOCommandGate::commandGate(this);
@@ -464,6 +466,8 @@ void TGLDmic::stop(IOService *provider) {
     gInstance = nullptr;
     injectorStop("driver stop");
     releaseImicStreams();
+    clBuf.release();
+    bdlBuf.release();
     if (gate) gate->runAction(gatedShutdown); else gatedShutdown(this, nullptr, nullptr, nullptr, nullptr);
     if (pmJoined) { PMstop(); pmJoined = false; }
     OSSafeReleaseNULL(pmParent);
@@ -481,6 +485,8 @@ void TGLDmic::stop(IOService *provider) {
 }
 
 void TGLDmic::free() {
+    clBuf.release();
+    bdlBuf.release();
     OSSafeReleaseNULL(capSnap);
     OSSafeReleaseNULL(logRing);
     OSSafeReleaseNULL(pci);

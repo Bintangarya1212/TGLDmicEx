@@ -120,6 +120,7 @@ private:
     bool coreRun();
     void corePowerDown();
     bool bootDsp();
+    bool preallocBuffers();
 
     // ---- Phase 3: DMIC capture test (only with -tgldmiccap, implies boot) ----
     bool captureRequested {false};

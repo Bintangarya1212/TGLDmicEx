@@ -304,7 +304,13 @@ bool TGLDmic::bootDsp() {
         fail("no spare output stream (all in use by the HDA driver)", idx); return false;
     }
 
-    if (!clBuf.alloc(pci, fwBytes) || !bdlBuf.alloc(pci, 4096)) { fail("DMA alloc (<4GB contiguous)", 0); return false; }
+    if (!clBuf.virt || clBuf.size < fwBytes) {
+        clBuf.release();
+        if (!clBuf.alloc(pci, fwBytes)) { fail("DMA alloc (<4GB contiguous)", 0); return false; }
+    }
+    if (!bdlBuf.virt) {
+        if (!bdlBuf.alloc(pci, 4096)) { fail("DMA alloc (<4GB contiguous)", 0); return false; }
+    }
     memcpy(clBuf.virt, fwData + skip, fwBytes);
     {
         IOMapper *m = IOMapper::copyMapperForDevice(pci);
@@ -395,7 +401,8 @@ bool TGLDmic::bootDsp() {
     } while (false);
 
     releaseLoaderStream(idx);
-    clBuf.release(); bdlBuf.release();
+    // Retain clBuf and bdlBuf across boots to prevent runtime DMA allocation
+    // failures due to physical memory fragmentation. Freed in TGLDmic::stop().
     if (ok) {
         snprintf(bootResult, sizeof(bootResult), "OK FW_READY");
         bootState = 1;
@@ -412,3 +419,24 @@ bool TGLDmic::bootDsp() {
     LOG("boot: PPCTL 0x%08x after boot, AppleHDA streams untouched", r32(ppOffset + HDA::PP_PPCTL));
     return ok;
 }
+
+bool TGLDmic::preallocBuffers() {
+    size_t fwBytes = (platformFamily == kPlatformCometLake) ? kSofCmlRiSize : kSofTglRiSize;
+    if (!clBuf.virt || clBuf.size < fwBytes) {
+        clBuf.release();
+        if (!clBuf.alloc(pci, fwBytes)) {
+            LOG("boot: early clBuf pre-allocation failed (%zu bytes), will retry on demand", fwBytes);
+            return false;
+        }
+    }
+    if (!bdlBuf.virt) {
+        if (!bdlBuf.alloc(pci, 4096)) {
+            LOG("boot: early bdlBuf pre-allocation failed, will retry on demand");
+            return false;
+        }
+    }
+    ensureCaptureBuffers();
+    LOG("boot: DMA buffers pre-allocated early (%zu bytes)", fwBytes);
+    return true;
+}
+

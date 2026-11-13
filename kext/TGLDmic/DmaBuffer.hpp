@@ -31,8 +31,16 @@ struct DmaBuffer {
         int mode = modeArg();
         physical = (mode == kForcePhysical);
         IOOptionBits opts = kIODirectionInOut | kIOMemoryPhysicallyContiguous | (physical ? kIOMemoryMapperNone : 0);
-        mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, size, 0x00000000FFFFF000ULL);
-        if (!mem || mem->prepare() != kIOReturnSuccess) { OSSafeReleaseNULL(mapper); release(); return false; }
+        for (int attempt = 0; attempt < 5; attempt++) {
+            mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, size, 0x00000000FFFFF000ULL);
+            if (mem) {
+                if (mem->prepare() == kIOReturnSuccess) break;
+                mem->complete();
+                OSSafeReleaseNULL(mem);
+            }
+            if (attempt < 4) IOSleep(50 * (attempt + 1));
+        }
+        if (!mem) { OSSafeReleaseNULL(mapper); release(); return false; }
         virt = static_cast<uint8_t *>(mem->getBytesNoCopy());
         bzero(virt, size);
         if (physical) {
