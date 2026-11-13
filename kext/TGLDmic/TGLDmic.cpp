@@ -79,7 +79,7 @@ void TGLDmic::joinPowerParent() {
     }
     pmParent = parent; pmParent->retain();
     pmJoined = true;
-    changePowerStateTo(keepRunning ? 1 : 0);                             // hold power if keepRunning
+    changePowerStateTo(0);                             // idle until a client records
     LOG("PM: power child of %s (power state %u)", parent->getMetaClass()->getClassName(), (unsigned)parent->getPowerState());
 }
 
@@ -271,12 +271,6 @@ bool TGLDmic::start(IOService *provider) {
     if (!tryInit()) LOG("controller not decoded yet (AppleHDA not started?) - retrying from timer");
 
     preallocBuffers();
-
-    if (keepRunning) {
-        gating(false);
-        uint8_t d0i3 = r8(0x104A);
-        if (d0i3 & 4) w8(0x104A, d0i3 & ~4);
-    }
 
     workLoop = IOWorkLoop::workLoop();      // own loop: boot polling must not block the provider's
     if (workLoop) {
