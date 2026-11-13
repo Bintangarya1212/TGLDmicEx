@@ -281,6 +281,7 @@ bool TGLDmic::start(IOService *provider) {
             timer->setTimeoutMS(kPollMs);
     }
     publish();
+    sleepNotifier = registerPrioritySleepWakeInterest(sleepWakeHandler, this);
     gInstance = this;
     registerService();
     return true;
@@ -462,8 +463,32 @@ IOReturn TGLDmic::gatedShutdown(OSObject *o, void *, void *, void *, void *) {
     return kIOReturnSuccess;
 }
 
+IOReturn TGLDmic::sleepWakeHandler(void *target, void *, UInt32 messageType,
+                                   IOService *, void *messageArgument, vm_size_t) {
+    auto self = static_cast<TGLDmic *>(target);
+    if (!self) return kIOReturnSuccess;
+    if (messageType == kIOMessageSystemWillSleep) {
+        self->LOG("pm: system will sleep - cleanly stopping DSP pipeline");
+        if (self->streaming || self->setupDone) {
+            self->pipelineStop();
+        }
+        self->corePowerDown();
+        self->gating(true);
+        self->acknowledgeSleepWakeNotification(messageArgument);
+    } else if (messageType == kIOMessageSystemHasPoweredOn) {
+        self->LOG("pm: system has powered on - waking");
+        self->gating(false);
+        self->acknowledgeSleepWakeNotification(messageArgument);
+    }
+    return kIOReturnSuccess;
+}
+
 void TGLDmic::stop(IOService *provider) {
     gInstance = nullptr;
+    if (sleepNotifier) {
+        sleepNotifier->remove();
+        sleepNotifier = nullptr;
+    }
     injectorStop("driver stop");
     releaseImicStreams();
     clBuf.release();

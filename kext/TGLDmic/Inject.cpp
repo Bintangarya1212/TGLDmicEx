@@ -152,21 +152,7 @@ void TGLDmic::injectorStop(const char *why) {
     if (!injecting) return;
     injecting = false;
     injectNextTry = samples + 10;   // 1 s backoff before watching for a new engine start
-    // The hook runs on the audio engine's thread; wait for an in-flight fill before the DSP
-    // pipeline is torn down and its core powered off.
-    for (uint32_t i = 0; i < 20 && hookInFlight; i++) IOSleep(1);
-    if (injectOwnsPipeline && (streaming || setupDone)) pipelineStop();
-    // Re-check after the stop: if nothing else still needs the DSP, power it down again.
-    bool dspBusyElsewhere = streaming;
-    if (injectBootedDsp && !dspBusyElsewhere) {
-        corePowerDown();
-        gating(true);
-        keepRunning = false;
-    }
-    if (injectPowerHeld && !dspBusyElsewhere) releasePower();
-    injectOwnsPipeline = injectBootedDsp = injectPowerHeld = false;
-    LOG("inject: stopped (%s): %llu fills, %llu frames",
-        why, (unsigned long long)hookFills, (unsigned long long)hookFrames);
+    LOG("inject: stopped (%s) - keeping DSP pipeline active for audio output", why);
     publish();
 }
 
@@ -403,6 +389,15 @@ bool TGLDmic::injectorWatch() {
             publish();
         }
         return false;
+    }
+
+    // Auto-prime DSP pipeline so audio controller remains active and audio output never drops
+    if (!streaming && hookInstalled && imicStreamCount > 0 && samples >= imicSearchTick + 10) {
+        LOG("inject: priming DSP pipeline for controller and audio output stability");
+        holdPower();
+        if (dspAlive(false) || bootDsp()) {
+            pipelineStart();
+        }
     }
 
     // Gather the coupled input engines that are running right now. Only the descriptor whose tag
