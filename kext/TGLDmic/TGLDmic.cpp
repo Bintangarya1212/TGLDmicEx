@@ -84,9 +84,17 @@ void TGLDmic::joinPowerParent() {
 }
 
 IOReturn TGLDmic::setPowerState(unsigned long state, IOService *) {
-    unsigned long old = pmState;
     pmState = state;
-    if (state == 0 && old == 1 && gate && (streaming || setupDone)) gate->runAction(gatedPowerLost);
+    if (state == 0) {
+        if (gate && (streaming || setupDone)) gate->runAction(gatedPowerLost);
+        else if (streaming || setupDone) {
+            pipelineStop();
+            corePowerDown();
+            gating(true);
+        }
+    } else if (state == 1) {
+        gating(false);
+    }
     return kIOPMAckImplied;
 }
 
@@ -280,9 +288,11 @@ bool TGLDmic::start(IOService *provider) {
         if (timer && workLoop->addEventSource(timer) == kIOReturnSuccess)
             timer->setTimeoutMS(kPollMs);
     }
+    PMinit();
+    pci->joinPMtree(this);
+    registerPowerDriver(this, gPowerStates, 2);
+    changePowerStateTo(1);
     publish();
-    if (auto rootDomain = getPMRootDomain())
-        sleepNotifier = rootDomain->registerPrioritySleepWakeInterest(sleepWakeHandler, this);
     gInstance = this;
     registerService();
     return true;
@@ -464,34 +474,8 @@ IOReturn TGLDmic::gatedShutdown(OSObject *o, void *, void *, void *, void *) {
     return kIOReturnSuccess;
 }
 
-IOReturn TGLDmic::sleepWakeHandler(void *target, void *, UInt32 messageType,
-                                   IOService *, void *messageArgument, vm_size_t) {
-    auto self = static_cast<TGLDmic *>(target);
-    if (!self) return kIOReturnSuccess;
-    if (messageType == kIOMessageSystemWillSleep) {
-        self->LOG("pm: system will sleep - cleanly stopping DSP pipeline");
-        if (self->streaming || self->setupDone) {
-            self->pipelineStop();
-        }
-        self->corePowerDown();
-        self->gating(true);
-        if (auto rootDomain = getPMRootDomain())
-            rootDomain->acknowledgeSleepWakeNotification(messageArgument);
-    } else if (messageType == kIOMessageSystemHasPoweredOn) {
-        self->LOG("pm: system has powered on - waking");
-        self->gating(false);
-        if (auto rootDomain = getPMRootDomain())
-            rootDomain->acknowledgeSleepWakeNotification(messageArgument);
-    }
-    return kIOReturnSuccess;
-}
-
 void TGLDmic::stop(IOService *provider) {
     gInstance = nullptr;
-    if (sleepNotifier) {
-        sleepNotifier->remove();
-        sleepNotifier = nullptr;
-    }
     injectorStop("driver stop");
     releaseImicStreams();
     clBuf.release();

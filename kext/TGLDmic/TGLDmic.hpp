@@ -5,8 +5,6 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOCommandGate.h>
-#include <IOKit/IOMessage.h>
-#include <IOKit/pwr_mgt/RootDomain.h>
 #include "DmaBuffer.hpp"
 
 struct IpcMsg;   // IpcReplay.hpp
@@ -200,10 +198,6 @@ private:
     uint32_t imicStreamCount {0};
     void cacheImicStreams(IOService *engine);
     void releaseImicStreams();
-
-    IONotifier *sleepNotifier {nullptr};
-    static IOReturn sleepWakeHandler(void *target, void *refCon, UInt32 messageType,
-                                     IOService *provider, void *messageArgument, vm_size_t argSize);
 
     // ---- Runtime / power state ----
     bool serviceMode {false};
