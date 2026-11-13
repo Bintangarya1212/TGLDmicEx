@@ -68,6 +68,7 @@ bool TGLDmic::pollDsp(uint32_t off, uint32_t mask, uint32_t want, uint32_t timeo
 }
 
 void TGLDmic::gating(bool enable) {
+    if (enable && keepRunning) return;
     if (!enable) {
         if (gatingOff) return;                    // already off: keep the original saved values
         gatingOff = true;

@@ -159,12 +159,14 @@ void TGLDmic::injectorStop(const char *why) {
     // Re-check after the stop: if nothing else still needs the DSP, power it down again.
     bool dspBusyElsewhere = streaming;
     if (injectBootedDsp && !dspBusyElsewhere) {
-        corePowerDown();
-        gating(true);
-        keepRunning = false;
+        if (!keepRunning) {
+            corePowerDown();
+            gating(true);
+        }
     }
-    if (injectPowerHeld && !dspBusyElsewhere) releasePower();
-    injectOwnsPipeline = injectBootedDsp = injectPowerHeld = false;
+    if (injectPowerHeld && !dspBusyElsewhere && !keepRunning) releasePower();
+    injectOwnsPipeline = injectBootedDsp = false;
+    if (!keepRunning) injectPowerHeld = false;
     LOG("inject: stopped (%s): %llu fills, %llu frames",
         why, (unsigned long long)hookFills, (unsigned long long)hookFrames);
     publish();

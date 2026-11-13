@@ -51,8 +51,8 @@ void TGLDmic::joinPowerParent() {
         }
         it->release();
     }
-    if (!parent) {                                    // retry from the timer (every 2 s), give up after 60 s
-        if (++pmSearchTicks == 30) { LOG("PM: no HDA driver on this controller - no power hold (unsupported setup)"); pmSearchTicks = 1000; }
+    if (!parent) {                                    // retry from the timer, give up after 60 s
+        if (++pmSearchTicks == 600) { LOG("PM: no HDA driver on this controller - no power hold (unsupported setup)"); pmSearchTicks = 1000; }
         return;
     }
     // Only AppleHDA idles the controller into reset while it stays the PCI device's driver; that is
@@ -79,7 +79,7 @@ void TGLDmic::joinPowerParent() {
     }
     pmParent = parent; pmParent->retain();
     pmJoined = true;
-    changePowerStateTo(0);                             // idle until a client records
+    changePowerStateTo(keepRunning ? 1 : 0);                             // hold power if keepRunning
     LOG("PM: power child of %s (power state %u)", parent->getMetaClass()->getClassName(), (unsigned)parent->getPowerState());
 }
 
@@ -271,6 +271,12 @@ bool TGLDmic::start(IOService *provider) {
     if (!tryInit()) LOG("controller not decoded yet (AppleHDA not started?) - retrying from timer");
 
     preallocBuffers();
+
+    if (keepRunning) {
+        gating(false);
+        uint8_t d0i3 = r8(0x104A);
+        if (d0i3 & 4) w8(0x104A, d0i3 & ~4);
+    }
 
     workLoop = IOWorkLoop::workLoop();      // own loop: boot polling must not block the provider's
     if (workLoop) {
