@@ -16,13 +16,13 @@ jobs:
       - name: Lilu plugin headers
         run: |
           # The Makefile expects ../Lilu.kext/Contents/Resources (Headers + Library/plugin_start.cpp).
-          # Clone Lilu with submodules and copy all headers including Vendor (hde64)
           git clone --recurse-submodules --depth 1 --branch 1.7.2 https://github.com/acidanthera/Lilu /tmp/Lilu-src
           mkdir -p Lilu.kext/Contents/Resources/Headers Lilu.kext/Contents/Resources/Library
-          cp -R /tmp/Lilu-src/Lilu/Headers/* Lilu.kext/Contents/Resources/Headers/
-          cp -R /tmp/Lilu-src/Lilu/Library/* Lilu.kext/Contents/Resources/Library/
-          # Copy any vendor headers (e.g. hde64.h) into Headers/
-          find /tmp/Lilu-src -name "*.h" -exec cp -n {} Lilu.kext/Contents/Resources/Headers/ \;
+          cp -R /tmp/Lilu-src/Lilu/Headers/* Lilu.kext/Contents/Resources/Headers/ 2>/dev/null || true
+          cp -R /tmp/Lilu-src/Lilu/Library/* Lilu.kext/Contents/Resources/Library/ 2>/dev/null || true
+          # Ensure hde64.h is present in Lilu headers
+          cp kext/TGLDmic/Headers/hde64.h Lilu.kext/Contents/Resources/Headers/
+          test -f Lilu.kext/Contents/Resources/Headers/hde64.h
           test -f Lilu.kext/Contents/Resources/Headers/kern_api.hpp
           test -f Lilu.kext/Contents/Resources/Library/plugin_start.cpp
       - name: Build kext
