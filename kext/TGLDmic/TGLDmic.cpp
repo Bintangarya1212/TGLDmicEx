@@ -51,8 +51,8 @@ void TGLDmic::joinPowerParent() {
         }
         it->release();
     }
-    if (!parent) {                                    // retry from the timer, give up after 60 s
-        if (++pmSearchTicks == 600) { LOG("PM: no HDA driver on this controller - no power hold (unsupported setup)"); pmSearchTicks = 1000; }
+    if (!parent) {                                    // retry from the timer (every 2 s), give up after 60 s
+        if (++pmSearchTicks == 30) { LOG("PM: no HDA driver on this controller - no power hold (unsupported setup)"); pmSearchTicks = 1000; }
         return;
     }
     // Only AppleHDA idles the controller into reset while it stays the PCI device's driver; that is
