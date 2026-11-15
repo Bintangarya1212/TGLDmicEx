@@ -68,23 +68,40 @@ bool TGLDmic::pollDsp(uint32_t off, uint32_t mask, uint32_t want, uint32_t timeo
 }
 
 void TGLDmic::gating(bool enable) {
+    // DSP block gate only: CGCTL.ADSPDCGE (bit 1) and PGCTL.ADSPPGD (bit 2) address the DSP, so both
+    // are toggled and restored from the values the HDA driver had when the session started.
+    //
+    // EM2.L1SEN (bit 13, HDA_EM2) is NOT restored. It is controller-wide: it makes the HDA link
+    // enter L1 aggressively. The snapshot is taken when the DSP starts, and on this machine the bit
+    // is already set then (EM2 0x84806000), so writing the snapshot back re-armed L1 on top of a
+    // playback stream that AppleHDA was running. The link then stalled: output went silent as soon
+    // as the DSP session ended (Streaming back to No) and only came back when the next DSP start
+    // cleared the bit again. Leaving L1SEN clear costs a little link power while the controller is
+    // idle; that is the trade for output that keeps working.
     if (!enable) {
-        if (gatingOff) return;                    // already off: keep the original saved values
+        if (gatingOff) return;
         gatingOff = true;
-        savedCgctl = pci->configRead32(PCI_CGCTL);
-        savedPgctl = pci->configRead32(PCI_PGCTL);
-        savedEm2 = r32(HDA_EM2);
-        pci->configWrite32(PCI_CGCTL, savedCgctl & ~PCI_CGCTL_ADSPDCGE);
-        w32(HDA_EM2, savedEm2 & ~EM2_L1SEN);
-        pci->configWrite32(PCI_PGCTL, savedPgctl | PCI_PGCTL_ADSPPGD);
-        LOG("boot: clock/power gating off (CGCTL 0x%08x PGCTL 0x%08x EM2 0x%08x)", savedCgctl, savedPgctl, savedEm2);
+        uint32_t cgctl = pci->configRead32(PCI_CGCTL);
+        uint32_t pgctl = pci->configRead32(PCI_PGCTL);
+        uint32_t em2 = r32(HDA_EM2);
+        savedCgBit = (cgctl & PCI_CGCTL_ADSPDCGE) != 0;
+        savedPgBit = (pgctl & PCI_PGCTL_ADSPPGD) != 0;
+        pci->configWrite32(PCI_CGCTL, cgctl & ~PCI_CGCTL_ADSPDCGE);
+        pci->configWrite32(PCI_PGCTL, pgctl | PCI_PGCTL_ADSPPGD);
+        w32(HDA_EM2, em2 & ~EM2_L1SEN);
+        LOG("boot: DSP gate off (CGCTL 0x%08x -> 0x%08x, PGCTL 0x%08x -> 0x%08x, EM2 0x%08x -> 0x%08x)",
+            cgctl, pci->configRead32(PCI_CGCTL), pgctl, pci->configRead32(PCI_PGCTL), em2, r32(HDA_EM2));
     } else {
         if (!gatingOff) return;
         gatingOff = false;
-        pci->configWrite32(PCI_PGCTL, savedPgctl);
-        w32(HDA_EM2, savedEm2);
-        pci->configWrite32(PCI_CGCTL, savedCgctl);
-        LOG("boot: clock/power gating restored");
+        uint32_t cgctl = pci->configRead32(PCI_CGCTL);
+        uint32_t pgctl = pci->configRead32(PCI_PGCTL);
+        if (savedCgBit) cgctl |= PCI_CGCTL_ADSPDCGE; else cgctl &= ~PCI_CGCTL_ADSPDCGE;
+        if (savedPgBit) pgctl |= PCI_PGCTL_ADSPPGD; else pgctl &= ~PCI_PGCTL_ADSPPGD;
+        pci->configWrite32(PCI_CGCTL, cgctl);
+        pci->configWrite32(PCI_PGCTL, pgctl);
+        LOG("boot: DSP gate restored (CGCTL 0x%08x, PGCTL 0x%08x, EM2 0x%08x left as is)",
+            pci->configRead32(PCI_CGCTL), pci->configRead32(PCI_PGCTL), r32(HDA_EM2));
     }
 }
 

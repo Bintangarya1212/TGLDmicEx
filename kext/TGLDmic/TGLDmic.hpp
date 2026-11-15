@@ -94,7 +94,7 @@ private:
     bool keepRunning {false};
     uint32_t bootState {0};           // 0 idle, 1 done ok, 2 failed
     char bootResult[96] {};
-    uint32_t savedCgctl {0}, savedPgctl {0}, savedEm2 {0};
+    bool savedCgBit {false}, savedPgBit {false};
     DmaBuffer clBuf, bdlBuf;
 
     void w32(uint32_t off, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(hda + off) = v; }
